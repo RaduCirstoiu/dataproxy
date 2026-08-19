@@ -207,10 +207,11 @@ class Socks5Connection(
         val timeoutPerAddress = (CONNECT_TIMEOUT_MS / candidates.size)
             .coerceAtLeast(MIN_ADDRESS_CONNECT_TIMEOUT_MS)
         var lastFailure: IOException? = null
+        val candidateFailures = mutableListOf<String>()
 
         for (resolved in candidates) {
             val remote = try {
-                cellular.createBoundSocket().apply {
+                cellular.createOutboundSocket(resolved).apply {
                     tcpNoDelay = true
                     soTimeout = timeoutPerAddress
                 }
@@ -230,10 +231,8 @@ class Socks5Connection(
                 return remote
             } catch (e: IOException) {
                 lastFailure = e
-                AppLog.w(
-                    TAG,
-                    "connect to ${target.display()} via ${resolved.hostAddress} failed: ${e.message}",
-                )
+                candidateFailures += "${resolved.hostAddress}: " +
+                    (e.message ?: e.javaClass.simpleName)
                 // RST instead of FIN/TIME_WAIT so the carrier NAT entry for
                 // this 5-tuple is torn down immediately before the fallback.
                 runCatching {
@@ -243,6 +242,11 @@ class Socks5Connection(
             }
         }
 
+        AppLog.w(
+            TAG,
+            "all ${candidateFailures.size} connect attempt(s) to ${target.display()} failed: " +
+                candidateFailures.joinToString(" | "),
+        )
         reply(output, lastFailure?.toReplyCode() ?: REP_HOST_UNREACHABLE)
         return null
     }

@@ -5,6 +5,8 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.system.ErrnoException
+import android.system.OsConstants
 import com.dataproxy.util.AppLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -14,13 +16,16 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.Socket
+import java.net.SocketException
 
 /**
  * Maintains a live handle on the device's cellular network so that outbound sockets
  * can be pinned to mobile data, irrespective of which network is the system default.
  *
- * The proxy listens on the WiFi/LAN side; every outbound socket it creates is
- * bound here with [bindSocket], forcing the egress over cellular.
+ * The proxy listens on the VPN/WiFi/LAN side; outbound sockets are explicitly
+ * bound to cellular. A narrowly guarded unbound fallback supports Android VPNs
+ * that reject explicit network selection even when cellular is the only
+ * possible physical route.
  */
 class CellularNetworkProvider(context: Context) {
 
@@ -33,6 +38,12 @@ class CellularNetworkProvider(context: Context) {
     @Volatile
     private var cellular: Network? = null
 
+    @Volatile
+    private var explicitSocketBindingBlocked = false
+
+    @Volatile
+    private var fallbackLogged = false
+
     private val callback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             // We do NOT call cm.bindProcessToNetwork(network) here.
@@ -44,10 +55,14 @@ class CellularNetworkProvider(context: Context) {
             //
             // All outbound traffic is pinned to cellular explicitly via
             // Network.bindSocket on each created socket
-            // (see createBoundSocket / createBoundDatagramSocket), and
+            // (see createOutboundSocket / createBoundDatagramSocket), and
             // every DNS lookup goes through Network.getAllByName on this
             // network handle. No code path in this app uses JVM-default
             // DNS, so dropping the process binding doesn't open a leak.
+            if (cellular != network) {
+                explicitSocketBindingBlocked = false
+                fallbackLogged = false
+            }
             cellular = network
             _state.value = State.Available(network)
             AppLog.i(TAG, "cellular available: $network")
@@ -56,6 +71,8 @@ class CellularNetworkProvider(context: Context) {
         override fun onLost(network: Network) {
             if (cellular == network) {
                 cellular = null
+                explicitSocketBindingBlocked = false
+                fallbackLogged = false
                 _state.value = State.Lost
                 AppLog.w(TAG, "cellular lost: $network")
             }
@@ -63,6 +80,8 @@ class CellularNetworkProvider(context: Context) {
 
         override fun onUnavailable() {
             cellular = null
+            explicitSocketBindingBlocked = false
+            fallbackLogged = false
             _state.value = State.Unavailable
             AppLog.w(TAG, "cellular unavailable")
         }
@@ -80,6 +99,9 @@ class CellularNetworkProvider(context: Context) {
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            // Builder adds NOT_RESTRICTED by default. Remove it explicitly so
+            // carrier networks marked restricted are eligible too.
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
             .build()
         cm.requestNetwork(request, callback)
         registered = true
@@ -93,6 +115,8 @@ class CellularNetworkProvider(context: Context) {
         runCatching { cm.unregisterNetworkCallback(callback) }
         registered = false
         cellular = null
+        explicitSocketBindingBlocked = false
+        fallbackLogged = false
         _state.value = State.Idle
         AppLog.i(TAG, "released cellular network")
     }
@@ -128,11 +152,30 @@ class CellularNetworkProvider(context: Context) {
         return runCatching { net.getAllByName(host).toList() }.getOrDefault(emptyList())
     }
 
-    /** Create a new outbound socket already bound to the cellular network. */
-    fun createBoundSocket(): Socket {
+    /**
+     * Create a TCP socket that is guaranteed to use cellular for [destination].
+     *
+     * Tailscale's Android VPN does not permit apps to explicitly bind around
+     * it, which surfaces as EPERM even if its split routes do not include the
+     * destination. In that one case we may use an ordinary socket, but only if
+     * cellular is the sole physical internet network and no VPN route matches
+     * the destination. Any uncertainty fails closed.
+     */
+    fun createOutboundSocket(destination: InetAddress): Socket {
+        if (explicitSocketBindingBlocked) {
+            return createSafeUnboundSocket(destination, null)
+        }
+
         val socket = Socket()
-        bindSocket(socket)
-        return socket
+        return try {
+            bindSocket(socket)
+            socket
+        } catch (error: Exception) {
+            runCatching { socket.close() }
+            if (!error.isOperationNotPermitted()) throw error
+            explicitSocketBindingBlocked = true
+            createSafeUnboundSocket(destination, error)
+        }
     }
 
     /** Block-bind a DatagramSocket to the cellular network for UDP egress. */
@@ -148,6 +191,88 @@ class CellularNetworkProvider(context: Context) {
         bindDatagram(socket)
         return socket
     }
+
+    private fun createSafeUnboundSocket(
+        destination: InetAddress,
+        bindFailure: Exception?,
+    ): Socket {
+        val currentCellular = cellular
+            ?: throw IllegalStateException("Cellular network not available", bindFailure)
+
+        val assessment = runCatching {
+            val internetPhysicalNetworks = cm.allNetworks.filter { network ->
+                val caps = cm.getNetworkCapabilities(network) ?: return@filter false
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            }
+            val cellularIsOnlyPhysical = internetPhysicalNetworks.size == 1 &&
+                internetPhysicalNetworks.single() == currentCellular &&
+                cm.getNetworkCapabilities(currentCellular)
+                    ?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
+
+            var inspectedAllVpnRoutes = true
+            var destinationRoutedByVpn = false
+            cm.allNetworks.forEach { network ->
+                val caps = cm.getNetworkCapabilities(network) ?: return@forEach
+                if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@forEach
+                val linkProperties = cm.getLinkProperties(network)
+                if (linkProperties == null) {
+                    inspectedAllVpnRoutes = false
+                } else if (linkProperties.routes.any { it.matches(destination) }) {
+                    destinationRoutedByVpn = true
+                }
+            }
+
+            FallbackAssessment(
+                allowed = canUseUnboundCellularFallback(
+                    cellularIsOnlyPhysicalInternetNetwork = cellularIsOnlyPhysical,
+                    inspectedAllVpnRoutes = inspectedAllVpnRoutes,
+                    destinationRoutedByVpn = destinationRoutedByVpn,
+                ),
+                reason = when {
+                    !cellularIsOnlyPhysical ->
+                        "cellular is not the only physical internet network"
+                    !inspectedAllVpnRoutes -> "VPN routes could not be inspected"
+                    destinationRoutedByVpn ->
+                        "the destination is covered by a VPN route or exit node"
+                    else -> "safe"
+                },
+            )
+        }.getOrElse { error ->
+            FallbackAssessment(false, "network route inspection failed: ${error.message}")
+        }
+
+        if (!assessment.allowed) {
+            throw SocketException(
+                "VPN blocked cellular binding; unbound fallback refused because ${assessment.reason}"
+            ).apply { bindFailure?.let(::initCause) }
+        }
+
+        if (!fallbackLogged) {
+            fallbackLogged = true
+            AppLog.w(
+                TAG,
+                "VPN blocked explicit cellular binding; using the default socket safely " +
+                    "because cellular is the only physical route and the destination is " +
+                    "outside VPN routes",
+            )
+        }
+        return Socket()
+    }
+
+    private fun Throwable.isOperationNotPermitted(): Boolean {
+        var current: Throwable? = this
+        while (current != null) {
+            if (current is ErrnoException && current.errno == OsConstants.EPERM) return true
+            current = current.cause
+        }
+        return false
+    }
+
+    private data class FallbackAssessment(
+        val allowed: Boolean,
+        val reason: String,
+    )
 
     sealed interface State {
         data object Idle : State

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -28,6 +29,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -54,10 +58,25 @@ fun LogsScreen(onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     val entries by AppLog.entries.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+    val isUserDragging by listState.interactionSource.collectIsDraggedAsState()
+    var followLive by remember { mutableStateOf(true) }
     val clipboard = LocalClipboardManager.current
 
+    // User interaction owns follow mode: scrolling away pauses it; dragging
+    // back to the bottom resumes it. Programmatic auto-scroll does not count
+    // as a user drag, so new entries continue following while already live.
+    LaunchedEffect(isUserDragging, listState.canScrollForward) {
+        if (isUserDragging) {
+            followLive = !listState.canScrollForward
+        } else if (!listState.canScrollForward) {
+            followLive = true
+        }
+    }
+
     LaunchedEffect(entries.lastOrNull()?.id) {
-        if (entries.isNotEmpty()) listState.animateScrollToItem(entries.lastIndex)
+        if (followLive && entries.isNotEmpty()) {
+            listState.animateScrollToItem(entries.lastIndex)
+        }
     }
 
     Column(
@@ -94,7 +113,8 @@ fun LogsScreen(onBack: () -> Unit) {
             },
         )
         Text(
-            text = "Live · ${entries.size}/500 entries · stored only until the app exits",
+            text = "${if (followLive) "Live" else "Paused"} · ${entries.size}/500 entries · " +
+                "stored only until the app exits",
             color = TextMuted,
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(horizontal = 8.dp),
