@@ -1,7 +1,7 @@
 package com.dataproxy.proxy
 
-import android.util.Log
 import com.dataproxy.network.CellularNetworkProvider
+import com.dataproxy.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -48,13 +48,13 @@ class Socks5Server(
                 bind(InetSocketAddress(addr, port), BACKLOG)
             }
         } catch (e: IOException) {
-            Log.e(TAG, "bind failed on $bindAddress:$port", e)
+            AppLog.e(TAG, "bind failed on $bindAddress:$port", e)
             onFatal(e); return
         }
 
         serverSocket = socket
         running = true
-        Log.i(TAG, "listening on ${socket.inetAddress.hostAddress}:${socket.localPort}")
+        AppLog.i(TAG, "listening on ${socket.inetAddress.hostAddress}:${socket.localPort}")
 
         acceptJob = scope.launch {
             try {
@@ -62,10 +62,10 @@ class Socks5Server(
                     val client = try {
                         socket.accept()
                     } catch (e: SocketException) {
-                        if (running) Log.w(TAG, "accept error: ${e.message}")
+                        if (running) AppLog.w(TAG, "accept error: ${e.message}")
                         break
                     } catch (e: IOException) {
-                        if (running) Log.w(TAG, "accept io error: ${e.message}")
+                        if (running) AppLog.w(TAG, "accept io error: ${e.message}")
                         break
                     }
                     Socks5Connection(
@@ -77,7 +77,7 @@ class Socks5Server(
                     ).handle()
                 }
             } finally {
-                Log.i(TAG, "accept loop exited")
+                AppLog.i(TAG, "accept loop exited")
             }
         }
     }
@@ -90,7 +90,7 @@ class Socks5Server(
         acceptJob?.cancel()
         acceptJob = null
         scope.cancel()
-        Log.i(TAG, "stopped")
+        AppLog.i(TAG, "stopped")
     }
 
     companion object {

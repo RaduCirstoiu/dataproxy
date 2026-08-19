@@ -1,7 +1,7 @@
 package com.dataproxy.proxy
 
-import android.util.Log
 import com.dataproxy.network.CellularNetworkProvider
+import com.dataproxy.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -53,7 +53,7 @@ class Socks5Connection(
                 else -> reply(output, REP_COMMAND_NOT_SUPPORTED)
             }
         } catch (t: Throwable) {
-            Log.d(TAG, "connection error: ${t.message}")
+            AppLog.d(TAG, "connection error: ${t.message}")
         } finally {
             closeQuietly()
             entry?.let { registry.close(it) }
@@ -65,7 +65,7 @@ class Socks5Connection(
     private fun negotiateMethod(input: DataInputStream, output: DataOutputStream): Boolean {
         val ver = input.readUnsignedByte()
         if (ver != 0x05) {
-            Log.d(TAG, "unsupported SOCKS version: $ver"); return false
+            AppLog.d(TAG, "unsupported SOCKS version: $ver"); return false
         }
         val nMethods = input.readUnsignedByte()
         val methods = ByteArray(nMethods)
@@ -108,7 +108,8 @@ class Socks5Connection(
         val ok = username == auth.username && password == auth.password
         output.write(byteArrayOf(0x01.toByte(), (if (ok) 0x00 else 0x01).toByte()))
         output.flush()
-        if (!ok) Log.d(TAG, "auth failed for user=$username")
+        // Do not place supplied credentials or usernames in logcat/the console.
+        if (!ok) AppLog.w(TAG, "SOCKS username/password authentication failed")
         return ok
     }
 
@@ -181,29 +182,16 @@ class Socks5Connection(
 
     private suspend fun openRemote(target: Target, output: DataOutputStream): Socket? {
         // Resolve hostnames using the cellular DNS so we don't fall through to WiFi DNS.
-        val resolved: InetAddress? = when (target) {
-            is Target.Ipv4 -> target.addr
-            is Target.Ipv6 -> target.addr
+        val resolvedAddresses: List<InetAddress> = when (target) {
+            is Target.Ipv4 -> listOf(target.addr)
+            is Target.Ipv6 -> listOf(target.addr)
             is Target.Domain -> withContext(Dispatchers.IO) {
                 cellular.resolveHost(target.host)
             }
         }
-        if (resolved == null) {
-            Log.d(TAG, "dns resolve failed via cellular for $target")
+        if (resolvedAddresses.isEmpty()) {
+            AppLog.w(TAG, "DNS resolve failed via cellular for ${target.display()}")
             reply(output, REP_HOST_UNREACHABLE); return null
-        }
-
-        val remote = try {
-            cellular.createBoundSocket().apply {
-                tcpNoDelay = true
-                soTimeout = CONNECT_TIMEOUT_MS
-            }
-        } catch (e: IllegalStateException) {
-            Log.w(TAG, "cellular unavailable: ${e.message}")
-            reply(output, REP_NETWORK_UNREACHABLE); return null
-        } catch (e: Exception) {
-            Log.w(TAG, "cellular socket create failed: ${e.message}")
-            reply(output, REP_NETWORK_UNREACHABLE); return null
         }
 
         val port = when (target) {
@@ -212,25 +200,55 @@ class Socks5Connection(
             is Target.Domain -> target.port
         }
 
-        return try {
-            withContext(Dispatchers.IO) {
-                remote.connect(InetSocketAddress(resolved, port), CONNECT_TIMEOUT_MS)
+        // DNS often returns both IPv6 and IPv4. Try every candidate within the
+        // original total timeout budget instead of failing permanently on the
+        // first unusable address.
+        val candidates = selectConnectCandidates(resolvedAddresses, MAX_CONNECT_CANDIDATES)
+        val timeoutPerAddress = (CONNECT_TIMEOUT_MS / candidates.size)
+            .coerceAtLeast(MIN_ADDRESS_CONNECT_TIMEOUT_MS)
+        var lastFailure: IOException? = null
+        val candidateFailures = mutableListOf<String>()
+
+        for (resolved in candidates) {
+            val remote = try {
+                cellular.createOutboundSocket(resolved).apply {
+                    tcpNoDelay = true
+                    soTimeout = timeoutPerAddress
+                }
+            } catch (e: IllegalStateException) {
+                AppLog.w(TAG, "cellular unavailable: ${e.message}")
+                reply(output, REP_NETWORK_UNREACHABLE); return null
+            } catch (e: Exception) {
+                AppLog.e(TAG, "cellular socket create failed", e)
+                reply(output, REP_NETWORK_UNREACHABLE); return null
             }
-            reply(output, REP_SUCCEEDED, remote.localSocketAddress as? InetSocketAddress)
-            remote
-        } catch (e: IOException) {
-            Log.d(TAG, "connect to $target failed: ${e.message}")
-            // RST instead of FIN/TIME_WAIT so the carrier NAT entry for this
-            // 5-tuple is torn down immediately. Failed handshakes are the
-            // usual culprits behind lingering NAT state that needed a full
-            // app force-stop to clear.
-            runCatching {
-                remote.setSoLinger(true, 0)
-                remote.close()
+
+            try {
+                withContext(Dispatchers.IO) {
+                    remote.connect(InetSocketAddress(resolved, port), timeoutPerAddress)
+                }
+                reply(output, REP_SUCCEEDED, remote.localSocketAddress as? InetSocketAddress)
+                return remote
+            } catch (e: IOException) {
+                lastFailure = e
+                candidateFailures += "${resolved.hostAddress}: " +
+                    (e.message ?: e.javaClass.simpleName)
+                // RST instead of FIN/TIME_WAIT so the carrier NAT entry for
+                // this 5-tuple is torn down immediately before the fallback.
+                runCatching {
+                    remote.setSoLinger(true, 0)
+                    remote.close()
+                }
             }
-            reply(output, e.toReplyCode())
-            null
         }
+
+        AppLog.w(
+            TAG,
+            "all ${candidateFailures.size} connect attempt(s) to ${target.display()} failed: " +
+                candidateFailures.joinToString(" | "),
+        )
+        reply(output, lastFailure?.toReplyCode() ?: REP_HOST_UNREACHABLE)
+        return null
     }
 
     // ---------------------------------------------------------------- UDP ASSOCIATE
@@ -252,10 +270,10 @@ class Socks5Connection(
                 },
             )
         } catch (e: IllegalStateException) {
-            Log.w(TAG, "UDP relay: cellular unavailable")
+            AppLog.w(TAG, "UDP relay: cellular unavailable")
             reply(output, REP_NETWORK_UNREACHABLE); return
         } catch (e: Exception) {
-            Log.w(TAG, "UDP relay setup failed: ${e.message}")
+            AppLog.e(TAG, "UDP relay setup failed", e)
             reply(output, REP_GENERAL_FAILURE); return
         }
 
@@ -391,6 +409,8 @@ class Socks5Connection(
         private const val BUFFER_SIZE = 16 * 1024
         private const val HANDSHAKE_TIMEOUT_MS = 15_000
         private const val CONNECT_TIMEOUT_MS = 15_000
+        private const val MIN_ADDRESS_CONNECT_TIMEOUT_MS = 3_000
+        private const val MAX_CONNECT_CANDIDATES = 5
 
         private const val METHOD_NO_AUTH = 0x00
         private const val METHOD_USERPASS = 0x02

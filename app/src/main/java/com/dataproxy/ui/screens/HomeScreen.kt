@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -60,6 +61,7 @@ import com.dataproxy.ui.theme.TextSecondary
 import com.dataproxy.ui.theme.ThemeMode
 import com.dataproxy.ui.theme.Warning
 import com.dataproxy.ui.viewmodel.MainViewModel
+import com.dataproxy.util.AppLog
 
 @Composable
 fun HomeScreen(
@@ -68,6 +70,7 @@ fun HomeScreen(
     onOpenListen: () -> Unit,
     onOpenDevices: () -> Unit,
     onOpenAuth: () -> Unit,
+    onOpenLogs: () -> Unit,
     onOpenAntiKill: () -> Unit,
     themeMode: ThemeMode,
     onCycleTheme: () -> Unit,
@@ -82,6 +85,7 @@ fun HomeScreen(
     val port by viewModel.port.collectAsStateWithLifecycle()
     val authEnabled by viewModel.authEnabled.collectAsStateWithLifecycle()
     val devices by viewModel.devices.collectAsStateWithLifecycle()
+    val logs by AppLog.entries.collectAsStateWithLifecycle()
     val activeDeviceCount = devices.count { it.activeConnections > 0 }
 
     val powerState = when (serviceState) {
@@ -161,6 +165,13 @@ fun HomeScreen(
                 title = "Auth",
                 subtitle = if (authEnabled) "required" else "disabled",
                 onClick = onOpenAuth,
+                modifier = Modifier.weight(1f),
+            )
+            NavTile(
+                icon = Icons.Rounded.Terminal,
+                title = "Logs",
+                subtitle = "${logs.size} entries",
+                onClick = onOpenLogs,
                 modifier = Modifier.weight(1f),
             )
         }

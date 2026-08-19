@@ -19,6 +19,7 @@ import com.dataproxy.proxy.AuthConfig
 import com.dataproxy.proxy.ConnectionRegistry
 import com.dataproxy.proxy.Socks5Server
 import com.dataproxy.proxy.SpeedSampler
+import com.dataproxy.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -85,6 +86,7 @@ class ProxyService : Service() {
     override fun onCreate() {
         super.onCreate()
         ensureChannel()
+        AppLog.i(TAG, "service created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -103,6 +105,7 @@ class ProxyService : Service() {
     }
 
     override fun onDestroy() {
+        AppLog.i(TAG, "service destroyed")
         super.onDestroy()
         stopProxy()
         scope.coroutineContext[Job]?.cancel()
@@ -111,7 +114,12 @@ class ProxyService : Service() {
     // ----------------------------------------------------------------- control
 
     fun startProxy(bindAddress: String, port: Int) {
-        if (_state.value is State.Running || _state.value is State.Starting) return
+        if (_state.value is State.Running || _state.value is State.Starting) {
+            AppLog.d(TAG, "start ignored because proxy is already active")
+            return
+        }
+
+        AppLog.i(TAG, "start requested on $bindAddress:$port")
 
         // Clear-state + kill: wipe everything from any previous cycle before
         // we touch cellular again. Idempotent on a clean slate.
@@ -125,6 +133,7 @@ class ProxyService : Service() {
             val net = cellular.awaitAvailable(15_000L)
             if (_state.value !is State.Starting) return@launch
             if (net == null) {
+                AppLog.e(TAG, "cellular network request timed out after 15 seconds")
                 _state.value = State.Error(
                     message = "Mobile data is unavailable. Turn it on to start the proxy.",
                     kind = State.ErrorKind.MobileDataUnavailable,
@@ -139,6 +148,7 @@ class ProxyService : Service() {
                 cellular = cellular,
                 registry = registry,
                 onFatal = { e ->
+                    AppLog.e(TAG, "listener failed", e)
                     _state.value = State.Error(
                         message = e.message ?: "Bind failed",
                         kind = State.ErrorKind.BindFailed,
@@ -151,6 +161,7 @@ class ProxyService : Service() {
             server = srv
             srv.start()
             if (srv.running) {
+                AppLog.i(TAG, "proxy running on $bindAddress:$port via $net")
                 _state.value = State.Running(bindAddress, port)
                 acquireWakeLock()
                 startSampling()
@@ -161,6 +172,7 @@ class ProxyService : Service() {
     }
 
     fun stopProxy() {
+        AppLog.i(TAG, "stop requested")
         _state.value = State.Stopped
         fullCleanup()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -195,6 +207,7 @@ class ProxyService : Service() {
                 when (cs) {
                     is CellularNetworkProvider.State.Available -> {
                         if (cur is State.Paused) {
+                            AppLog.i(TAG, "cellular restored; proxy resumed")
                             _state.value = State.Running(addr, port)
                             updateNotification(addr, port, totals.value, rates.value)
                         }
@@ -202,6 +215,7 @@ class ProxyService : Service() {
                     is CellularNetworkProvider.State.Lost,
                     is CellularNetworkProvider.State.Unavailable -> {
                         if (cur is State.Running) {
+                            AppLog.w(TAG, "cellular lost; proxy paused")
                             _state.value = State.Paused(
                                 addr, port,
                                 "Waiting for mobile data",
@@ -351,6 +365,7 @@ class ProxyService : Service() {
     }
 
     companion object {
+        private const val TAG = "ProxyService"
         const val ACTION_START = "com.dataproxy.ACTION_START"
         const val ACTION_STOP = "com.dataproxy.ACTION_STOP"
         const val EXTRA_BIND_ADDRESS = "extra.bindAddress"

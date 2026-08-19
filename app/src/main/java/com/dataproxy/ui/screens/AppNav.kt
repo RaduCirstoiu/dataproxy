@@ -45,7 +45,7 @@ import com.dataproxy.ui.theme.Warning
 import com.dataproxy.ui.viewmodel.MainViewModel
 import com.dataproxy.util.AntiKillStep
 
-enum class Tab { Home, ListenAddress, Devices, Auth, AntiKill }
+enum class Tab { Home, ListenAddress, Devices, Auth, Logs, AntiKill }
 
 @Composable
 fun AppNav(
@@ -93,6 +93,7 @@ fun AppNav(
                     onOpenListen = { onTabChange(Tab.ListenAddress) },
                     onOpenDevices = { onTabChange(Tab.Devices) },
                     onOpenAuth = { onTabChange(Tab.Auth) },
+                    onOpenLogs = { onTabChange(Tab.Logs) },
                     onOpenAntiKill = { onTabChange(Tab.AntiKill) },
                     themeMode = themeMode,
                     onCycleTheme = onCycleTheme,
@@ -108,6 +109,9 @@ fun AppNav(
                 )
                 Tab.Auth -> AuthScreen(
                     viewModel = viewModel,
+                    onBack = { onTabChange(Tab.Home) },
+                )
+                Tab.Logs -> LogsScreen(
                     onBack = { onTabChange(Tab.Home) },
                 )
                 Tab.AntiKill -> AntiKillScreen(

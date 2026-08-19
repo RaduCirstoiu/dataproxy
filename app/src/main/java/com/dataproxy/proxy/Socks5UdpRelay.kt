@@ -1,7 +1,7 @@
 package com.dataproxy.proxy
 
-import android.util.Log
 import com.dataproxy.network.CellularNetworkProvider
+import com.dataproxy.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -55,7 +55,7 @@ class Socks5UdpRelay(
             try {
                 clientSocket.receive(pkt)
             } catch (e: Exception) {
-                if (!clientSocket.isClosed) Log.d(TAG, "client recv ended: ${e.message}")
+                if (!clientSocket.isClosed) AppLog.d(TAG, "client recv ended: ${e.message}")
                 break
             }
             val src = pkt.socketAddress as? InetSocketAddress ?: continue
@@ -64,7 +64,7 @@ class Socks5UdpRelay(
             val parsed = parseUdpRequest(buf, pkt.length) ?: continue
             val resolved: InetAddress? = when (parsed.dst) {
                 is UdpDst.Ip -> parsed.dst.addr
-                is UdpDst.Host -> runCatching { cellular.resolveHost(parsed.dst.name) }.getOrNull()
+                is UdpDst.Host -> cellular.resolveHost(parsed.dst.name).firstOrNull()
             }
             if (resolved == null) continue
 
@@ -77,7 +77,7 @@ class Socks5UdpRelay(
                 )
                 if (parsed.dataLength > 0) onBytes(parsed.dataLength, 0)
             } catch (e: Exception) {
-                Log.d(TAG, "remote send failed: ${e.message}")
+                AppLog.w(TAG, "remote send failed: ${e.message}")
             }
         }
     }
@@ -89,7 +89,7 @@ class Socks5UdpRelay(
             try {
                 remoteSocket.receive(pkt)
             } catch (e: Exception) {
-                if (!remoteSocket.isClosed) Log.d(TAG, "remote recv ended: ${e.message}")
+                if (!remoteSocket.isClosed) AppLog.d(TAG, "remote recv ended: ${e.message}")
                 break
             }
             val reply = clientReplyAddr ?: continue
@@ -98,7 +98,7 @@ class Socks5UdpRelay(
                 clientSocket.send(DatagramPacket(out, out.size, reply.address, reply.port))
                 if (pkt.length > 0) onBytes(0, pkt.length)
             } catch (e: Exception) {
-                Log.d(TAG, "client send failed: ${e.message}")
+                AppLog.w(TAG, "client send failed: ${e.message}")
             }
         }
     }

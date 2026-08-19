@@ -3,6 +3,7 @@ package com.dataproxy
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import com.dataproxy.util.AppLog
 import java.security.Security
 
 class DataProxyApplication : Application() {
@@ -19,6 +20,7 @@ class DataProxyApplication : Application() {
         // make TLS look broken to every client.
         Security.setProperty("networkaddress.cache.ttl", "0")
         Security.setProperty("networkaddress.cache.negative.ttl", "0")
+        AppLog.i("DataProxy", "app process started")
 
         val mgr = getSystemService(NotificationManager::class.java)
         if (mgr.getNotificationChannel(CHANNEL_ID) == null) {
