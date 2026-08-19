@@ -64,7 +64,7 @@ class Socks5UdpRelay(
             val parsed = parseUdpRequest(buf, pkt.length) ?: continue
             val resolved: InetAddress? = when (parsed.dst) {
                 is UdpDst.Ip -> parsed.dst.addr
-                is UdpDst.Host -> runCatching { cellular.resolveHost(parsed.dst.name) }.getOrNull()
+                is UdpDst.Host -> cellular.resolveHost(parsed.dst.name).firstOrNull()
             }
             if (resolved == null) continue
 

@@ -9,11 +9,11 @@ import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.Socket
-import kotlin.coroutines.resume
 
 /**
  * Maintains a live handle on the device's cellular network so that outbound sockets
@@ -80,7 +80,6 @@ class CellularNetworkProvider(context: Context) {
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
             .build()
         cm.requestNetwork(request, callback)
         registered = true
@@ -105,35 +104,28 @@ class CellularNetworkProvider(context: Context) {
         net.bindSocket(socket)
     }
 
-    /** Suspend until cellular is up, or return null on [timeoutMs]. */
+    /**
+     * Suspend until the registered callback has stored a cellular network, or
+     * return null on [timeoutMs].
+     *
+     * Do not issue a second request here. A temporary callback could return a
+     * network before [callback] populated [cellular], allowing the service to
+     * report Running while every outbound bind still failed as unavailable.
+     */
     suspend fun awaitAvailable(timeoutMs: Long = 10_000L): Network? = withTimeoutOrNull(timeoutMs) {
         cellular?.let { return@withTimeoutOrNull it }
-        suspendCancellableCoroutine<Network?> { cont ->
-            val watcher = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    runCatching { cm.unregisterNetworkCallback(this) }
-                    if (cont.isActive) cont.resume(network)
-                }
-                override fun onUnavailable() {
-                    runCatching { cm.unregisterNetworkCallback(this) }
-                    if (cont.isActive) cont.resume(null)
-                }
-            }
-            val req = NetworkRequest.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build()
-            cm.requestNetwork(req, watcher, timeoutMs.toInt())
-            cont.invokeOnCancellation {
-                runCatching { cm.unregisterNetworkCallback(watcher) }
-            }
+        when (val result = _state.first {
+            it is State.Available || it is State.Unavailable
+        }) {
+            is State.Available -> result.network
+            else -> null
         }
     }
 
-    /** Resolve a hostname using the cellular network's DNS (not WiFi DNS). */
-    fun resolveHost(host: String): java.net.InetAddress? {
-        val net = cellular ?: return null
-        return runCatching { net.getAllByName(host).firstOrNull() }.getOrNull()
+    /** Resolve every address using cellular DNS (not WiFi DNS). */
+    fun resolveHost(host: String): List<InetAddress> {
+        val net = cellular ?: return emptyList()
+        return runCatching { net.getAllByName(host).toList() }.getOrDefault(emptyList())
     }
 
     /** Create a new outbound socket already bound to the cellular network. */

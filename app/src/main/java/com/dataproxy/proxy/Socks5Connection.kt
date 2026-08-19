@@ -181,29 +181,16 @@ class Socks5Connection(
 
     private suspend fun openRemote(target: Target, output: DataOutputStream): Socket? {
         // Resolve hostnames using the cellular DNS so we don't fall through to WiFi DNS.
-        val resolved: InetAddress? = when (target) {
-            is Target.Ipv4 -> target.addr
-            is Target.Ipv6 -> target.addr
+        val resolvedAddresses: List<InetAddress> = when (target) {
+            is Target.Ipv4 -> listOf(target.addr)
+            is Target.Ipv6 -> listOf(target.addr)
             is Target.Domain -> withContext(Dispatchers.IO) {
                 cellular.resolveHost(target.host)
             }
         }
-        if (resolved == null) {
+        if (resolvedAddresses.isEmpty()) {
             Log.d(TAG, "dns resolve failed via cellular for $target")
             reply(output, REP_HOST_UNREACHABLE); return null
-        }
-
-        val remote = try {
-            cellular.createBoundSocket().apply {
-                tcpNoDelay = true
-                soTimeout = CONNECT_TIMEOUT_MS
-            }
-        } catch (e: IllegalStateException) {
-            Log.w(TAG, "cellular unavailable: ${e.message}")
-            reply(output, REP_NETWORK_UNREACHABLE); return null
-        } catch (e: Exception) {
-            Log.w(TAG, "cellular socket create failed: ${e.message}")
-            reply(output, REP_NETWORK_UNREACHABLE); return null
         }
 
         val port = when (target) {
@@ -212,25 +199,48 @@ class Socks5Connection(
             is Target.Domain -> target.port
         }
 
-        return try {
-            withContext(Dispatchers.IO) {
-                remote.connect(InetSocketAddress(resolved, port), CONNECT_TIMEOUT_MS)
+        // DNS often returns both IPv6 and IPv4. Try every candidate within the
+        // original total timeout budget instead of failing permanently on the
+        // first unusable address.
+        val candidates = selectConnectCandidates(resolvedAddresses, MAX_CONNECT_CANDIDATES)
+        val timeoutPerAddress = (CONNECT_TIMEOUT_MS / candidates.size)
+            .coerceAtLeast(MIN_ADDRESS_CONNECT_TIMEOUT_MS)
+        var lastFailure: IOException? = null
+
+        for (resolved in candidates) {
+            val remote = try {
+                cellular.createBoundSocket().apply {
+                    tcpNoDelay = true
+                    soTimeout = timeoutPerAddress
+                }
+            } catch (e: IllegalStateException) {
+                Log.w(TAG, "cellular unavailable: ${e.message}")
+                reply(output, REP_NETWORK_UNREACHABLE); return null
+            } catch (e: Exception) {
+                Log.w(TAG, "cellular socket create failed: ${e.message}")
+                reply(output, REP_NETWORK_UNREACHABLE); return null
             }
-            reply(output, REP_SUCCEEDED, remote.localSocketAddress as? InetSocketAddress)
-            remote
-        } catch (e: IOException) {
-            Log.d(TAG, "connect to $target failed: ${e.message}")
-            // RST instead of FIN/TIME_WAIT so the carrier NAT entry for this
-            // 5-tuple is torn down immediately. Failed handshakes are the
-            // usual culprits behind lingering NAT state that needed a full
-            // app force-stop to clear.
-            runCatching {
-                remote.setSoLinger(true, 0)
-                remote.close()
+
+            try {
+                withContext(Dispatchers.IO) {
+                    remote.connect(InetSocketAddress(resolved, port), timeoutPerAddress)
+                }
+                reply(output, REP_SUCCEEDED, remote.localSocketAddress as? InetSocketAddress)
+                return remote
+            } catch (e: IOException) {
+                lastFailure = e
+                Log.d(TAG, "connect to $target via ${resolved.hostAddress} failed: ${e.message}")
+                // RST instead of FIN/TIME_WAIT so the carrier NAT entry for
+                // this 5-tuple is torn down immediately before the fallback.
+                runCatching {
+                    remote.setSoLinger(true, 0)
+                    remote.close()
+                }
             }
-            reply(output, e.toReplyCode())
-            null
         }
+
+        reply(output, lastFailure?.toReplyCode() ?: REP_HOST_UNREACHABLE)
+        return null
     }
 
     // ---------------------------------------------------------------- UDP ASSOCIATE
@@ -391,6 +401,8 @@ class Socks5Connection(
         private const val BUFFER_SIZE = 16 * 1024
         private const val HANDSHAKE_TIMEOUT_MS = 15_000
         private const val CONNECT_TIMEOUT_MS = 15_000
+        private const val MIN_ADDRESS_CONNECT_TIMEOUT_MS = 3_000
+        private const val MAX_CONNECT_CANDIDATES = 5
 
         private const val METHOD_NO_AUTH = 0x00
         private const val METHOD_USERPASS = 0x02
