@@ -1,7 +1,7 @@
 package com.dataproxy.proxy
 
-import android.util.Log
 import com.dataproxy.network.CellularNetworkProvider
+import com.dataproxy.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -53,7 +53,7 @@ class Socks5Connection(
                 else -> reply(output, REP_COMMAND_NOT_SUPPORTED)
             }
         } catch (t: Throwable) {
-            Log.d(TAG, "connection error: ${t.message}")
+            AppLog.d(TAG, "connection error: ${t.message}")
         } finally {
             closeQuietly()
             entry?.let { registry.close(it) }
@@ -65,7 +65,7 @@ class Socks5Connection(
     private fun negotiateMethod(input: DataInputStream, output: DataOutputStream): Boolean {
         val ver = input.readUnsignedByte()
         if (ver != 0x05) {
-            Log.d(TAG, "unsupported SOCKS version: $ver"); return false
+            AppLog.d(TAG, "unsupported SOCKS version: $ver"); return false
         }
         val nMethods = input.readUnsignedByte()
         val methods = ByteArray(nMethods)
@@ -108,7 +108,8 @@ class Socks5Connection(
         val ok = username == auth.username && password == auth.password
         output.write(byteArrayOf(0x01.toByte(), (if (ok) 0x00 else 0x01).toByte()))
         output.flush()
-        if (!ok) Log.d(TAG, "auth failed for user=$username")
+        // Do not place supplied credentials or usernames in logcat/the console.
+        if (!ok) AppLog.w(TAG, "SOCKS username/password authentication failed")
         return ok
     }
 
@@ -189,7 +190,7 @@ class Socks5Connection(
             }
         }
         if (resolvedAddresses.isEmpty()) {
-            Log.d(TAG, "dns resolve failed via cellular for $target")
+            AppLog.w(TAG, "DNS resolve failed via cellular for ${target.display()}")
             reply(output, REP_HOST_UNREACHABLE); return null
         }
 
@@ -214,10 +215,10 @@ class Socks5Connection(
                     soTimeout = timeoutPerAddress
                 }
             } catch (e: IllegalStateException) {
-                Log.w(TAG, "cellular unavailable: ${e.message}")
+                AppLog.w(TAG, "cellular unavailable: ${e.message}")
                 reply(output, REP_NETWORK_UNREACHABLE); return null
             } catch (e: Exception) {
-                Log.w(TAG, "cellular socket create failed: ${e.message}")
+                AppLog.e(TAG, "cellular socket create failed", e)
                 reply(output, REP_NETWORK_UNREACHABLE); return null
             }
 
@@ -229,7 +230,10 @@ class Socks5Connection(
                 return remote
             } catch (e: IOException) {
                 lastFailure = e
-                Log.d(TAG, "connect to $target via ${resolved.hostAddress} failed: ${e.message}")
+                AppLog.w(
+                    TAG,
+                    "connect to ${target.display()} via ${resolved.hostAddress} failed: ${e.message}",
+                )
                 // RST instead of FIN/TIME_WAIT so the carrier NAT entry for
                 // this 5-tuple is torn down immediately before the fallback.
                 runCatching {
@@ -262,10 +266,10 @@ class Socks5Connection(
                 },
             )
         } catch (e: IllegalStateException) {
-            Log.w(TAG, "UDP relay: cellular unavailable")
+            AppLog.w(TAG, "UDP relay: cellular unavailable")
             reply(output, REP_NETWORK_UNREACHABLE); return
         } catch (e: Exception) {
-            Log.w(TAG, "UDP relay setup failed: ${e.message}")
+            AppLog.e(TAG, "UDP relay setup failed", e)
             reply(output, REP_GENERAL_FAILURE); return
         }
 

@@ -1,6 +1,6 @@
 package com.dataproxy.network
 
-import android.util.Log
+import com.dataproxy.util.AppLog
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -33,7 +33,7 @@ object NetworkInterfaceLister {
         val ifaces = try {
             NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
         } catch (e: Exception) {
-            Log.w("NetIface", "enum failed: ${e.message}")
+            AppLog.w("NetIface", "interface enumeration failed", e)
             emptyList()
         }
 

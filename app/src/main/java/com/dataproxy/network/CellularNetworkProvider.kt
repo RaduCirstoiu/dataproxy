@@ -5,7 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.util.Log
+import com.dataproxy.util.AppLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -50,21 +50,21 @@ class CellularNetworkProvider(context: Context) {
             // DNS, so dropping the process binding doesn't open a leak.
             cellular = network
             _state.value = State.Available(network)
-            Log.d(TAG, "cellular available: $network")
+            AppLog.i(TAG, "cellular available: $network")
         }
 
         override fun onLost(network: Network) {
             if (cellular == network) {
                 cellular = null
                 _state.value = State.Lost
-                Log.d(TAG, "cellular lost: $network")
+                AppLog.w(TAG, "cellular lost: $network")
             }
         }
 
         override fun onUnavailable() {
             cellular = null
             _state.value = State.Unavailable
-            Log.w(TAG, "cellular unavailable")
+            AppLog.w(TAG, "cellular unavailable")
         }
 
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
@@ -84,7 +84,7 @@ class CellularNetworkProvider(context: Context) {
         cm.requestNetwork(request, callback)
         registered = true
         _state.value = State.Requesting
-        Log.d(TAG, "requested cellular network")
+        AppLog.i(TAG, "requested cellular network")
     }
 
     @Synchronized
@@ -94,7 +94,7 @@ class CellularNetworkProvider(context: Context) {
         registered = false
         cellular = null
         _state.value = State.Idle
-        Log.d(TAG, "released cellular network")
+        AppLog.i(TAG, "released cellular network")
     }
 
     /** Block-bind a socket to the cellular network. Throws if cellular is not up. */
