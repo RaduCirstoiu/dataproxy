@@ -51,8 +51,10 @@ internal class LogBuffer(
 
 /**
  * Mirrors important diagnostics to both Android logcat and an in-app console.
- * The console is intentionally memory-only so destinations and failures are
- * not left behind on disk after the app process exits.
+ * Traffic diagnostics in this console are intentionally memory-only so
+ * destinations and failures are not left behind on disk after the process
+ * exits. [LifecycleDiagnostics] separately persists a small set of
+ * privacy-safe process/battery breadcrumbs needed to diagnose OS kills.
  */
 object AppLog {
     private const val MAX_STACK_CHARS = 4_000

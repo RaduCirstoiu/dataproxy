@@ -32,7 +32,7 @@ adb logcat -d AndroidRuntime:E "*:S" | tail -20
 
 # End-to-end smoke test once the proxy is running (use time.ir, NOT 8.8.8.8 /
 # example.com — the user's mtnirancell cellular network blocks those):
-curl --socks5-hostname 127.0.0.1:1080 -s -o /dev/null \
+curl --socks5-hostname 127.0.0.1:10800 -s -o /dev/null \
   -w 'http=%{http_code} time=%{time_total}s\n' --max-time 25 https://time.ir
 ```
 

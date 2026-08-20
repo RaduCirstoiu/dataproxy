@@ -20,7 +20,7 @@
 
 DataProxy runs entirely on the phone as a SOCKS5 server. Any client on the
 same network — a laptop, a TV box, another phone — points its SOCKS5
-settings at `phone-ip:1080`, and every TCP/UDP packet that leaves the proxy
+settings at `phone-ip:10800`, and every TCP/UDP packet that leaves the proxy
 is bound to the cellular `Network` handle. The listener itself stays on the
 Wi‑Fi interface, so inbound clients can reach it without any VPN setup, root,
 or tethering tricks.
@@ -186,7 +186,7 @@ the first time.
    require a username/password from clients (RFC 1929).
 5. **Connect a client.** From any device on the same Wi‑Fi:
    ```
-   curl --socks5-hostname <phone-ip>:1080 https://your-target.example
+   curl --socks5-hostname <phone-ip>:10800 https://your-target.example
    ```
    Use `--socks5-hostname` (not `--socks5`) so DNS also goes over cellular
    — see [DNS and client config](#dns-and-client-config) below.
@@ -203,8 +203,8 @@ Configure your client for remote DNS:
 |---|---|
 | `curl` | `--socks5-hostname` (not `--socks5`) |
 | Firefox | tick **Proxy DNS when using SOCKS v5** in proxy settings |
-| Chromium | `--proxy-server="socks5://host:1080"` — remote DNS is the SOCKS5 default |
-| Python `requests` / `urllib3` | `socks5h://host:1080` — the `h` matters |
+| Chromium | `--proxy-server="socks5://host:10800"` — remote DNS is the SOCKS5 default |
+| Python `requests` / `urllib3` | `socks5h://host:10800` — the `h` matters |
 | `proxychains-ng` | `proxy_dns` on (default) |
 
 ## Build from source

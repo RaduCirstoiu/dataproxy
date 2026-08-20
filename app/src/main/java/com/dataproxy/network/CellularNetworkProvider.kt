@@ -99,9 +99,6 @@ class CellularNetworkProvider(context: Context) {
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            // Builder adds NOT_RESTRICTED by default. Remove it explicitly so
-            // carrier networks marked restricted are eligible too.
-            .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
             .build()
         cm.requestNetwork(request, callback)
         registered = true

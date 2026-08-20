@@ -15,6 +15,8 @@ import com.dataproxy.service.ProxyService
  */
 object AntiKillPreferences {
     private const val KEY_AUTOSTART = "autostart_on_boot"
+    private const val KEY_MANUAL_CONFIRMATION_SCHEMA = "antikill_manual_confirmation_schema"
+    private const val MANUAL_CONFIRMATION_SCHEMA = 2
     private fun stepKey(step: AntiKillStep) = "antikill_step_${step.name}"
 
     private fun prefs(context: Context) =
@@ -32,5 +34,20 @@ object AntiKillPreferences {
 
     fun setStepDone(context: Context, step: AntiKillStep, done: Boolean) {
         prefs(context).edit().putBoolean(stepKey(step), done).apply()
+    }
+
+    /**
+     * v1 marked OEM steps complete as soon as their Settings page opened.
+     * Those values cannot be trusted, so reset them once and require an
+     * explicit "Mark done" confirmation under the corrected UI.
+     */
+    fun migrateInvalidAutoConfirmations(context: Context) {
+        val prefs = prefs(context)
+        if (prefs.getInt(KEY_MANUAL_CONFIRMATION_SCHEMA, 0) >= MANUAL_CONFIRMATION_SCHEMA) return
+        val editor = prefs.edit()
+        AntiKillStep.entries.filterNot { it.autoDetectable }.forEach {
+            editor.remove(stepKey(it))
+        }
+        editor.putInt(KEY_MANUAL_CONFIRMATION_SCHEMA, MANUAL_CONFIRMATION_SCHEMA).commit()
     }
 }

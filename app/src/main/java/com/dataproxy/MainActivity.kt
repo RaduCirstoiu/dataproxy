@@ -28,7 +28,9 @@ import com.dataproxy.ui.theme.DataProxyTheme
 import com.dataproxy.ui.viewmodel.MainViewModel
 import com.dataproxy.util.AntiKillPreferences
 import com.dataproxy.util.AntiKillStep
+import com.dataproxy.util.AppLog
 import com.dataproxy.util.BatteryOptimizationHelper
+import com.dataproxy.util.LifecycleDiagnostics
 import com.dataproxy.util.OemHelper
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -36,6 +38,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
+    private var pendingManualSetting: AntiKillStep? = null
 
     // Each launcher is fired independently from a per-item "Allow" button in
     // the perms dialog. No more auto-chaining — the user explicitly grants
@@ -43,15 +46,20 @@ class MainActivity : ComponentActivity() {
     // state poller in setContent picks up the new permission state.
     private val notifPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { /* state poll picks it up */ }
+    ) { granted -> logPermissionResult("notifications", granted) }
 
     private val batteryOptResult = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
-    ) { /* state poll picks it up */ }
+    ) {
+        logPermissionResult(
+            "battery optimization exemption",
+            BatteryOptimizationHelper.isIgnoring(this),
+        )
+    }
 
     private val phonePermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { /* state poll picks it up */ }
+    ) { granted -> logPermissionResult("phone state (optional)", granted) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -160,19 +168,31 @@ class MainActivity : ComponentActivity() {
                     backgroundDone = backgroundDone,
                     lockRecentsDone = lockRecentsDone,
                     onOpenAutoStart = {
-                        OemHelper.openAutoStart(this)
-                        AntiKillPreferences.setStepDone(this, AntiKillStep.AutoStart, true)
-                        autoStartDone = true
+                        openManualSetting(AntiKillStep.AutoStart) {
+                            OemHelper.openAutoStart(this)
+                        }
                     },
                     onOpenBackground = {
-                        OemHelper.openBackgroundActivity(this)
-                        AntiKillPreferences.setStepDone(this, AntiKillStep.BackgroundActivity, true)
-                        backgroundDone = true
+                        openManualSetting(AntiKillStep.BackgroundActivity) {
+                            OemHelper.openBackgroundActivity(this)
+                        }
                     },
                     onOpenLockRecents = {
-                        OemHelper.openLockInRecentsGuide(this)
-                        AntiKillPreferences.setStepDone(this, AntiKillStep.LockInRecents, true)
-                        lockRecentsDone = true
+                        openManualSetting(AntiKillStep.LockInRecents) {
+                            OemHelper.openLockInRecentsGuide(this)
+                        }
+                    },
+                    onToggleAutoStartDone = {
+                        autoStartDone = !autoStartDone
+                        setManualConfirmation(AntiKillStep.AutoStart, autoStartDone)
+                    },
+                    onToggleBackgroundDone = {
+                        backgroundDone = !backgroundDone
+                        setManualConfirmation(AntiKillStep.BackgroundActivity, backgroundDone)
+                    },
+                    onToggleLockRecentsDone = {
+                        lockRecentsDone = !lockRecentsDone
+                        setManualConfirmation(AntiKillStep.LockInRecents, lockRecentsDone)
                     },
                     showMobileDataDialog = showMobileDataDialog,
                     onDismissMobileDataDialog = { showMobileDataDialog = false },
@@ -187,10 +207,25 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        AppLog.i("Lifecycle", "app UI entered foreground")
         viewModel.bind()
     }
 
+    override fun onResume() {
+        super.onResume()
+        val step = pendingManualSetting ?: return
+        pendingManualSetting = null
+        val message = "returned from ${step.title} settings; Android cannot read this " +
+            "MagicOS setting, so it remains unconfirmed until you tap Mark done; " +
+            LifecycleDiagnostics.restrictionSummary(this)
+        AppLog.i("Permissions", message)
+        LifecycleDiagnostics.record(this, message)
+    }
+
     override fun onStop() {
+        val message = "app UI left foreground; the proxy foreground service should continue"
+        AppLog.i("Lifecycle", message)
+        LifecycleDiagnostics.record(this, message)
         super.onStop()
         viewModel.unbind()
     }
@@ -238,6 +273,32 @@ class MainActivity : ComponentActivity() {
 
     private fun requestPhonePermission() {
         runCatching { phonePermission.launch(Manifest.permission.READ_PHONE_STATE) }
+    }
+
+    private fun openManualSetting(step: AntiKillStep, open: () -> Unit) {
+        pendingManualSetting = step
+        val message = "opening ${step.title} settings; this OEM setting is not detectable"
+        AppLog.i("Permissions", message)
+        LifecycleDiagnostics.record(this, message)
+        runCatching(open).onFailure {
+            pendingManualSetting = null
+            AppLog.e("Permissions", "could not open ${step.title} settings", it)
+        }
+    }
+
+    private fun setManualConfirmation(step: AntiKillStep, done: Boolean) {
+        AntiKillPreferences.setStepDone(this, step, done)
+        val message = "${step.title}: user marked ${if (done) "done" else "not done"}; " +
+            "setting cannot be verified programmatically"
+        AppLog.i("Permissions", message)
+        LifecycleDiagnostics.record(this, message)
+    }
+
+    private fun logPermissionResult(name: String, granted: Boolean) {
+        val message = "$name ${if (granted) "granted" else "NOT granted"}; " +
+            LifecycleDiagnostics.restrictionSummary(this)
+        if (granted) AppLog.i("Permissions", message) else AppLog.w("Permissions", message)
+        LifecycleDiagnostics.record(this, message)
     }
 
     private fun actuallyStart() {
