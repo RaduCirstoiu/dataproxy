@@ -37,6 +37,7 @@ class Socks5Connection(
     private var udpRelay: Socks5UdpRelay? = null
 
     fun handle(): Job = scope.launch(Dispatchers.IO) {
+        var phase = "socket setup"
         try {
             clientSocket.tcpNoDelay = true
             clientSocket.soTimeout = HANDSHAKE_TIMEOUT_MS
@@ -44,16 +45,32 @@ class Socks5Connection(
             val input = DataInputStream(clientSocket.getInputStream())
             val output = DataOutputStream(clientSocket.getOutputStream())
 
+            phase = "SOCKS method negotiation"
             if (!negotiateMethod(input, output)) return@launch
+            phase = "SOCKS request"
             val req = readRequest(input, output) ?: return@launch
 
             when (req.cmd) {
-                CMD_CONNECT -> handleConnect(req.target, output)
-                CMD_UDP_ASSOCIATE -> handleUdpAssociate(input, output)
-                else -> reply(output, REP_COMMAND_NOT_SUPPORTED)
+                CMD_CONNECT -> {
+                    phase = "CONNECT tunnel"
+                    handleConnect(req.target, output)
+                }
+                CMD_UDP_ASSOCIATE -> {
+                    phase = "UDP ASSOCIATE tunnel"
+                    handleUdpAssociate(input, output)
+                }
+                else -> {
+                    phase = "unsupported command reply"
+                    reply(output, REP_COMMAND_NOT_SUPPORTED)
+                }
             }
         } catch (t: Throwable) {
-            AppLog.d(TAG, "connection error: ${t.message}")
+            val detail = t.message?.takeIf(String::isNotBlank) ?: "no message"
+            AppLog.d(
+                TAG,
+                "connection error during $phase: ${t.javaClass.simpleName}: $detail",
+                t,
+            )
         } finally {
             closeQuietly()
             entry?.let { registry.close(it) }

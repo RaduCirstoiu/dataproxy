@@ -18,7 +18,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteSweep
@@ -136,15 +135,17 @@ fun LogsScreen(onBack: () -> Unit) {
                     modifier = Modifier.align(Alignment.Center),
                 )
             } else {
-                SelectionContainer {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        state = listState,
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        items(entries, key = AppLogEntry::id) { entry ->
-                            LogRow(entry)
-                        }
+                // A SelectionContainer spanning a live LazyColumn can retain
+                // stale selectable IDs while rows are added or recycled. That
+                // crashes inside Compose's MultiWidgetSelectionDelegate. The
+                // toolbar Copy action remains the reliable way to copy logs.
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    state = listState,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    items(entries, key = AppLogEntry::id) { entry ->
+                        LogRow(entry)
                     }
                 }
             }

@@ -6,10 +6,10 @@ import org.junit.Test
 
 class DefaultSocketFallbackTest {
     @Test
-    fun `allows fallback when cellular is sole physical route and vpn misses destination`() {
+    fun `allows fallback when all physical routes are cellular and vpn misses destination`() {
         assertTrue(
             canUseUnboundCellularFallback(
-                cellularIsOnlyPhysicalInternetNetwork = true,
+                allPhysicalInternetNetworksAreCellularOnly = true,
                 inspectedAllVpnRoutes = true,
                 destinationRoutedByVpn = false,
             )
@@ -17,10 +17,10 @@ class DefaultSocketFallbackTest {
     }
 
     @Test
-    fun `refuses fallback when wifi or another physical network exists`() {
+    fun `refuses fallback when a non-cellular physical network exists`() {
         assertFalse(
             canUseUnboundCellularFallback(
-                cellularIsOnlyPhysicalInternetNetwork = false,
+                allPhysicalInternetNetworksAreCellularOnly = false,
                 inspectedAllVpnRoutes = true,
                 destinationRoutedByVpn = false,
             )
@@ -31,7 +31,7 @@ class DefaultSocketFallbackTest {
     fun `refuses fallback when vpn routes destination such as an exit node`() {
         assertFalse(
             canUseUnboundCellularFallback(
-                cellularIsOnlyPhysicalInternetNetwork = true,
+                allPhysicalInternetNetworksAreCellularOnly = true,
                 inspectedAllVpnRoutes = true,
                 destinationRoutedByVpn = true,
             )
@@ -42,9 +42,41 @@ class DefaultSocketFallbackTest {
     fun `refuses fallback when vpn routes cannot be inspected`() {
         assertFalse(
             canUseUnboundCellularFallback(
-                cellularIsOnlyPhysicalInternetNetwork = true,
+                allPhysicalInternetNetworksAreCellularOnly = true,
                 inspectedAllVpnRoutes = false,
                 destinationRoutedByVpn = false,
+            )
+        )
+    }
+
+    @Test
+    fun `accepts multiple cellular-only network objects`() {
+        assertTrue(
+            allNetworksAreCellularOnly(
+                transportTypesByNetwork = listOf(intArrayOf(0), intArrayOf(0)),
+                cellularTransport = 0,
+            )
+        )
+    }
+
+    @Test
+    fun `rejects wifi mixed or unknown physical transports`() {
+        assertFalse(
+            allNetworksAreCellularOnly(
+                transportTypesByNetwork = listOf(intArrayOf(0), intArrayOf(1)),
+                cellularTransport = 0,
+            )
+        )
+        assertFalse(
+            allNetworksAreCellularOnly(
+                transportTypesByNetwork = listOf(intArrayOf(0, 1)),
+                cellularTransport = 0,
+            )
+        )
+        assertFalse(
+            allNetworksAreCellularOnly(
+                transportTypesByNetwork = emptyList(),
+                cellularTransport = 0,
             )
         )
     }

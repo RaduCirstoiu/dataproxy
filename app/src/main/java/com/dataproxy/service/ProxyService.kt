@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -20,6 +22,7 @@ import com.dataproxy.proxy.ConnectionRegistry
 import com.dataproxy.proxy.Socks5Server
 import com.dataproxy.proxy.SpeedSampler
 import com.dataproxy.util.AppLog
+import com.dataproxy.util.LifecycleDiagnostics
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -55,6 +58,24 @@ class ProxyService : Service() {
     private var publishJob: Job? = null
     private var cellularWatchJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var powerReceiverRegistered = false
+    private var explicitStopRequested = false
+
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val event = when (intent.action) {
+                Intent.ACTION_SCREEN_OFF -> "screen turned off"
+                Intent.ACTION_SCREEN_ON -> "screen turned on"
+                PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> "device idle mode changed"
+                PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> "power-save mode changed"
+                else -> return
+            }
+            val message = "$event; proxy=${stateLabel()}; " +
+                LifecycleDiagnostics.restrictionSummary(context)
+            AppLog.i("Lifecycle", message)
+            LifecycleDiagnostics.record(context, message)
+        }
+    }
 
     private val _state = MutableStateFlow<State>(State.Stopped)
     val state: StateFlow<State> = _state.asStateFlow()
@@ -86,17 +107,40 @@ class ProxyService : Service() {
     override fun onCreate() {
         super.onCreate()
         ensureChannel()
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            this,
+            powerReceiver,
+            filter,
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        powerReceiverRegistered = true
         AppLog.i(TAG, "service created")
+        LifecycleDiagnostics.record(this, "proxy service created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        AppLog.i(
+            TAG,
+            "start command: action=${intent?.action ?: "null"}; flags=$flags; startId=$startId",
+        )
         when (intent?.action) {
             ACTION_START -> {
                 val addr = intent.getStringExtra(EXTRA_BIND_ADDRESS) ?: "0.0.0.0"
                 val port = intent.getIntExtra(EXTRA_PORT, DEFAULT_PORT)
-                startProxy(addr, port)
+                try {
+                    startProxy(addr, port)
+                } catch (error: Exception) {
+                    handleSynchronousStartFailure(error)
+                }
             }
             ACTION_STOP -> {
+                explicitStopRequested = true
                 stopProxy()
                 stopSelf()
             }
@@ -105,10 +149,41 @@ class ProxyService : Service() {
     }
 
     override fun onDestroy() {
-        AppLog.i(TAG, "service destroyed")
-        super.onDestroy()
-        stopProxy()
+        val wasActive = _state.value !is State.Stopped
+        val message = "service destroyed; proxy=${stateLabel()}; " +
+            "explicitStop=$explicitStopRequested"
+        if (wasActive && !explicitStopRequested) AppLog.w(TAG, message) else AppLog.i(TAG, message)
+        LifecycleDiagnostics.record(this, message)
+        if (powerReceiverRegistered) {
+            runCatching { unregisterReceiver(powerReceiver) }
+            powerReceiverRegistered = false
+        }
+        _state.value = State.Stopped
+        fullCleanup()
         scope.coroutineContext[Job]?.cancel()
+        super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val message = "app removed from Recents; proxy=${stateLabel()}; service remains foreground"
+        AppLog.w("Lifecycle", message)
+        LifecycleDiagnostics.record(this, message)
+        super.onTaskRemoved(rootIntent)
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        val message = "service trim-memory: ${LifecycleDiagnostics.trimMemoryLabel(level)}; " +
+            "proxy=${stateLabel()}"
+        if (level >= 40) AppLog.w("Lifecycle", message) else AppLog.i("Lifecycle", message)
+        LifecycleDiagnostics.record(this, message)
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        val message = "service received low-memory warning; proxy=${stateLabel()}"
+        AppLog.w("Lifecycle", message)
+        LifecycleDiagnostics.record(this, message)
     }
 
     // ----------------------------------------------------------------- control
@@ -120,15 +195,27 @@ class ProxyService : Service() {
         }
 
         AppLog.i(TAG, "start requested on $bindAddress:$port")
+        explicitStopRequested = false
+        LifecycleDiagnostics.setProxyExpected(
+            this,
+            expected = true,
+            event = "proxy start requested",
+        )
 
         // Clear-state + kill: wipe everything from any previous cycle before
         // we touch cellular again. Idempotent on a clean slate.
+        LifecycleDiagnostics.record(this, "startup step: cleaning previous state")
         fullCleanup()
+        LifecycleDiagnostics.record(this, "startup step complete: previous state cleaned")
 
         _state.value = State.Starting(bindAddress, port)
+        LifecycleDiagnostics.record(this, "startup step: entering foreground service")
         startForegroundNow(bindAddress, port)
+        LifecycleDiagnostics.record(this, "startup step complete: foreground service active")
 
+        LifecycleDiagnostics.record(this, "startup step: requesting cellular network")
         cellular.start()
+        LifecycleDiagnostics.record(this, "startup step complete: cellular request submitted")
         startJob = scope.launch {
             val net = cellular.awaitAvailable(15_000L)
             if (_state.value !is State.Starting) return@launch
@@ -140,6 +227,11 @@ class ProxyService : Service() {
                 )
                 fullCleanup()
                 stopForeground(STOP_FOREGROUND_REMOVE)
+                LifecycleDiagnostics.setProxyExpected(
+                    this@ProxyService,
+                    expected = false,
+                    event = "proxy stopped after cellular request timeout",
+                )
                 return@launch
             }
             val srv = Socks5Server(
@@ -155,6 +247,11 @@ class ProxyService : Service() {
                     )
                     fullCleanup()
                     stopForeground(STOP_FOREGROUND_REMOVE)
+                    LifecycleDiagnostics.setProxyExpected(
+                        this@ProxyService,
+                        expected = false,
+                        event = "proxy stopped after listener failure: ${e.javaClass.simpleName}",
+                    )
                 },
                 authProvider = ::currentAuthConfig,
             )
@@ -162,6 +259,7 @@ class ProxyService : Service() {
             srv.start()
             if (srv.running) {
                 AppLog.i(TAG, "proxy running on $bindAddress:$port via $net")
+                LifecycleDiagnostics.record(this@ProxyService, "proxy running")
                 _state.value = State.Running(bindAddress, port)
                 acquireWakeLock()
                 startSampling()
@@ -173,9 +271,39 @@ class ProxyService : Service() {
 
     fun stopProxy() {
         AppLog.i(TAG, "stop requested")
+        explicitStopRequested = true
+        LifecycleDiagnostics.setProxyExpected(
+            this,
+            expected = false,
+            event = "proxy stopped by explicit request",
+        )
         _state.value = State.Stopped
         fullCleanup()
         stopForeground(STOP_FOREGROUND_REMOVE)
+    }
+
+    private fun stateLabel(): String = when (_state.value) {
+        State.Stopped -> "stopped"
+        is State.Starting -> "starting"
+        is State.Running -> "running"
+        is State.Paused -> "paused"
+        is State.Error -> "error"
+    }
+
+    private fun handleSynchronousStartFailure(error: Exception) {
+        AppLog.e(TAG, "synchronous proxy startup failed", error)
+        LifecycleDiagnostics.recordException(this, "synchronous proxy startup failed", error)
+        _state.value = State.Error(
+            message = error.message ?: error.javaClass.simpleName,
+            kind = State.ErrorKind.Generic,
+        )
+        runCatching { fullCleanup() }
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        LifecycleDiagnostics.setProxyExpected(
+            this,
+            expected = false,
+            event = "proxy stopped after synchronous startup failure",
+        )
     }
 
     /**
@@ -370,7 +498,7 @@ class ProxyService : Service() {
         const val ACTION_STOP = "com.dataproxy.ACTION_STOP"
         const val EXTRA_BIND_ADDRESS = "extra.bindAddress"
         const val EXTRA_PORT = "extra.port"
-        const val DEFAULT_PORT = 1080
+        const val DEFAULT_PORT = 10800
 
         private const val CHANNEL_ID = "dataproxy.status"
         private const val NOTIF_ID = 1001

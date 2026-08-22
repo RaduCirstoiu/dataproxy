@@ -99,9 +99,6 @@ class CellularNetworkProvider(context: Context) {
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            // Builder adds NOT_RESTRICTED by default. Remove it explicitly so
-            // carrier networks marked restricted are eligible too.
-            .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
             .build()
         cm.requestNetwork(request, callback)
         registered = true
@@ -158,7 +155,7 @@ class CellularNetworkProvider(context: Context) {
      * Tailscale's Android VPN does not permit apps to explicitly bind around
      * it, which surfaces as EPERM even if its split routes do not include the
      * destination. In that one case we may use an ordinary socket, but only if
-     * cellular is the sole physical internet network and no VPN route matches
+     * every physical internet network is cellular-only and no VPN route matches
      * the destination. Any uncertainty fails closed.
      */
     fun createOutboundSocket(destination: InetAddress): Socket {
@@ -200,15 +197,21 @@ class CellularNetworkProvider(context: Context) {
             ?: throw IllegalStateException("Cellular network not available", bindFailure)
 
         val assessment = runCatching {
-            val internetPhysicalNetworks = cm.allNetworks.filter { network ->
-                val caps = cm.getNetworkCapabilities(network) ?: return@filter false
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            val internetPhysicalNetworks = cm.allNetworks.mapNotNull { network ->
+                val caps = cm.getNetworkCapabilities(network) ?: return@mapNotNull null
+                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
+                    !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                ) {
+                    return@mapNotNull null
+                }
+                caps
             }
-            val cellularIsOnlyPhysical = internetPhysicalNetworks.size == 1 &&
-                internetPhysicalNetworks.single() == currentCellular &&
-                cm.getNetworkCapabilities(currentCellular)
-                    ?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
+            val allPhysicalNetworksAreCellularOnly = allNetworksAreCellularOnly(
+                transportTypesByNetwork = internetPhysicalNetworks.map { caps ->
+                    KNOWN_TRANSPORT_TYPES.filter(caps::hasTransport).toIntArray()
+                },
+                cellularTransport = NetworkCapabilities.TRANSPORT_CELLULAR,
+            )
 
             var inspectedAllVpnRoutes = true
             var destinationRoutedByVpn = false
@@ -225,13 +228,16 @@ class CellularNetworkProvider(context: Context) {
 
             FallbackAssessment(
                 allowed = canUseUnboundCellularFallback(
-                    cellularIsOnlyPhysicalInternetNetwork = cellularIsOnlyPhysical,
+                    allPhysicalInternetNetworksAreCellularOnly =
+                        allPhysicalNetworksAreCellularOnly,
                     inspectedAllVpnRoutes = inspectedAllVpnRoutes,
                     destinationRoutedByVpn = destinationRoutedByVpn,
                 ),
                 reason = when {
-                    !cellularIsOnlyPhysical ->
-                        "cellular is not the only physical internet network"
+                    internetPhysicalNetworks.isEmpty() ->
+                        "no physical internet network was visible"
+                    !allPhysicalNetworksAreCellularOnly ->
+                        "a non-cellular or mixed physical internet transport is active"
                     !inspectedAllVpnRoutes -> "VPN routes could not be inspected"
                     destinationRoutedByVpn ->
                         "the destination is covered by a VPN route or exit node"
@@ -253,7 +259,7 @@ class CellularNetworkProvider(context: Context) {
             AppLog.w(
                 TAG,
                 "VPN blocked explicit cellular binding; using the default socket safely " +
-                    "because cellular is the only physical route and the destination is " +
+                    "because all physical routes are cellular-only and the destination is " +
                     "outside VPN routes",
             )
         }
@@ -284,5 +290,21 @@ class CellularNetworkProvider(context: Context) {
 
     companion object {
         private const val TAG = "CellularNetwork"
+
+        // NetworkCapabilities does not expose its transport set as an array.
+        // Enumerate every transport Android 16 defines so mixed or unknown-for-
+        // this-release physical routes fail the cellular-only check.
+        private val KNOWN_TRANSPORT_TYPES = intArrayOf(
+            NetworkCapabilities.TRANSPORT_CELLULAR,
+            NetworkCapabilities.TRANSPORT_WIFI,
+            NetworkCapabilities.TRANSPORT_BLUETOOTH,
+            NetworkCapabilities.TRANSPORT_ETHERNET,
+            NetworkCapabilities.TRANSPORT_VPN,
+            NetworkCapabilities.TRANSPORT_WIFI_AWARE,
+            NetworkCapabilities.TRANSPORT_LOWPAN,
+            NetworkCapabilities.TRANSPORT_USB,
+            NetworkCapabilities.TRANSPORT_THREAD,
+            NetworkCapabilities.TRANSPORT_SATELLITE,
+        )
     }
 }

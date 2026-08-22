@@ -72,6 +72,9 @@ fun AppNav(
     onOpenAutoStart: () -> Unit,
     onOpenBackground: () -> Unit,
     onOpenLockRecents: () -> Unit,
+    onToggleAutoStartDone: () -> Unit,
+    onToggleBackgroundDone: () -> Unit,
+    onToggleLockRecentsDone: () -> Unit,
     showMobileDataDialog: Boolean,
     onDismissMobileDataDialog: () -> Unit,
     onOpenMobileDataSettings: () -> Unit,
@@ -138,6 +141,9 @@ fun AppNav(
             onOpenAutoStart = onOpenAutoStart,
             onOpenBackground = onOpenBackground,
             onOpenLockRecents = onOpenLockRecents,
+            onToggleAutoStartDone = onToggleAutoStartDone,
+            onToggleBackgroundDone = onToggleBackgroundDone,
+            onToggleLockRecentsDone = onToggleLockRecentsDone,
             onDismiss = onDismissPermsDialog,
         )
     }
@@ -186,6 +192,9 @@ private fun PermissionsDialog(
     onOpenAutoStart: () -> Unit,
     onOpenBackground: () -> Unit,
     onOpenLockRecents: () -> Unit,
+    onToggleAutoStartDone: () -> Unit,
+    onToggleBackgroundDone: () -> Unit,
+    onToggleLockRecentsDone: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -233,28 +242,34 @@ private fun PermissionsDialog(
                 PermItem(
                     icon = AntiKillStep.AutoStart.icon,
                     title = AntiKillStep.AutoStart.title,
-                    reason = AntiKillStep.AutoStart.description,
+                    reason = AntiKillStep.AutoStart.description +
+                        " MagicOS doesn't expose its state; enable it, return, then tap Mark done.",
                     granted = autoStartDone,
                     onAllow = onOpenAutoStart,
                     actionLabel = "Open",
+                    onConfirm = onToggleAutoStartDone,
                 )
                 Spacer(Modifier.height(12.dp))
                 PermItem(
                     icon = AntiKillStep.BackgroundActivity.icon,
                     title = AntiKillStep.BackgroundActivity.title,
-                    reason = AntiKillStep.BackgroundActivity.description,
+                    reason = AntiKillStep.BackgroundActivity.description +
+                        " MagicOS doesn't expose its state; enable it, return, then tap Mark done.",
                     granted = backgroundDone,
                     onAllow = onOpenBackground,
                     actionLabel = "Open",
+                    onConfirm = onToggleBackgroundDone,
                 )
                 Spacer(Modifier.height(12.dp))
                 PermItem(
                     icon = AntiKillStep.LockInRecents.icon,
                     title = AntiKillStep.LockInRecents.title,
-                    reason = AntiKillStep.LockInRecents.description,
+                    reason = AntiKillStep.LockInRecents.description +
+                        " Android can't verify the Recents lock; lock it, return, then tap Mark done.",
                     granted = lockRecentsDone,
                     onAllow = onOpenLockRecents,
                     actionLabel = "Open",
+                    onConfirm = onToggleLockRecentsDone,
                 )
 
                 if (phoneApplicable) {
@@ -286,6 +301,7 @@ private fun PermItem(
     granted: Boolean,
     onAllow: () -> Unit,
     actionLabel: String = "Allow",
+    onConfirm: (() -> Unit)? = null,
 ) {
     Row(verticalAlignment = Alignment.Top) {
         Box(
@@ -317,7 +333,20 @@ private fun PermItem(
             )
         }
         Spacer(Modifier.width(8.dp))
-        if (granted) {
+        if (onConfirm != null) {
+            Column(horizontalAlignment = Alignment.End) {
+                TextButton(onClick = onAllow) {
+                    Text(actionLabel, color = Accent, fontWeight = FontWeight.SemiBold)
+                }
+                TextButton(onClick = onConfirm) {
+                    Text(
+                        if (granted) "✓ Done" else "Mark done",
+                        color = if (granted) Accent else TextSecondary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        } else if (granted) {
             Icon(
                 imageVector = Icons.Rounded.CheckCircle,
                 contentDescription = "Granted",
